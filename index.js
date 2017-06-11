@@ -35,10 +35,15 @@ var client = new SteamUser({
         enablePicsCache: true
     });
 var ownedSubs = [];
+var freeApps = config.free_apps == null ? false : config.free_apps;
+var unwantedAppTypes = config.unwanted_app_types == null ? [] : config.unwanted_app_types;
+var online = config.online == null ? true : config.online;
+var cacheState = false;
+
 if (config.winauth_usage) {
     SteamAuth.Sync(function(error) {
         if (error)
-            console.log(error);
+            console.log(JSON.stringify(error));
         var auth = new SteamAuth(config.winauth_data);
         auth.once("ready", function() {
             config.steam_credentials.authCode = config.steam_credentials.twoFactorCode = auth.calculateCode();
@@ -54,10 +59,14 @@ function steamLogin() {
     client.logOn(config.steam_credentials);
     client.on("loggedOn", function(response) {
         console.log("Logged into Steam as " + client.steamID.getSteam3RenderedID());
-        client.setPersona(SteamUser.EPersonaState.Online);
+        var state = SteamUser.EPersonaState.Online;
+        if (!online) {
+            state = SteamUser.EPersonaState.Offline;
+        }
+        client.setPersona(state);
     });
     client.on("error", function(error) {
-        console.log(error);
+        console.log(JSON.stringify(error));
     });
     client.on("accountLimitations", function(limited, communityBanned, locked, canInviteFriends) {
         var limitations = [];
@@ -87,13 +96,16 @@ function steamLogin() {
     });
     client.on("webSession", function(sessionID, cookies) {
         console.log("Got web session");
+        if (cacheState) {
+            return;
+        }
         var community = new SteamCommunity();
         community.setCookies(cookies);
         community.httpRequestGet("https://steamcommunity.com/openid/login?openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.mode=checkid_setup&openid.realm=https%3A%2F%2Fsteamdb.info%2F&openid.return_to=https%3A%2F%2Fsteamdb.info%2Flogin%2F", {
             followAllRedirects: true
         }, function(error, response, data) {
             if (error) {
-                console.log(error);
+                console.log(JSON.stringify(error));
             }
             var url = $("#openidForm", data).attr("action");
             var formdata = $("#openidForm", data).serializeObject();
@@ -105,49 +117,101 @@ function steamLogin() {
     });
     client.on("licenses", function(licenses) {
         console.log("Our account owns " + licenses.length + " license" + numberEnding(licenses.length));
-        var subs = [];
-        licenses.forEach(function(license) {
-            subs.push(license.package_id);
-        });
-        ownedSubs = subs;
     });
     client.on("appOwnershipCached", function() {
         console.log("Cached app ownership");
+        if (cacheState) {
+            return;
+        }
+        cacheState = true
+        if (freeApps) {
+            ownedSubs = client.getOwnedApps();
+            ownedString = " app";
+        } else {
+            ownedSubs = client.getOwnedPackages()
+            ownedString = " package"
+        }
+        console.log("Our account owns " + ownedSubs.length + ownedString + numberEnding(ownedSubs.length));
     });
 }
 
 function steamdbLogin(error, response, data) {
     console.log("Attempting to login to SteamDB")
     if (error) {
-        console.log(error);
+        console.log(JSON.stringify(error));
         CloudScraper.request({
             url: response.request.href,
             method: "GET"
         }, steamdbLogin);
     } else {
         var jar = request.jar();
-        response.headers["set-cookie"].forEach(function(cookiestr) {
-            var cookie = request.cookie(cookiestr);
-            jar.setCookie(cookie, "https://steamdb.info/");
-        });
+
+        if (typeof response.headers["set-cookie"] != 'undefined') {
+            response.headers["set-cookie"].forEach(function(cookiestr) {
+                var cookie = request.cookie(cookiestr);
+                jar.setCookie(cookie, "https://steamdb.info/");
+            });
+        }
+
+        var m_url = "https://steamdb.info/search/?a=app_keynames&type=-1&keyname=243&operator=3&keyvalue=1";
+        if (!freeApps) {
+            m_url = "https://steamdb.info/search/?a=sub_keynames&keyname=1&operator=3&keyvalue=12";
+        }
+
         CloudScraper.request({
-            //url: "https://steamdb.info/search/?a=app_keynames&type=-1&keyname=243&operator=3&keyvalue=1",
-            url: "https://steamdb.info/search/?a=sub_keynames&keyname=1&operator=3&keyvalue=12",
+            url: m_url,
             method: "GET",
             jar: jar
         }, function(error, response, data) {
             if (error) {
-                console.log(error);
+                console.log(JSON.stringify(error));
             } else {
+
+                console.log("Processing.....");
+
                 var freeSubs = [];
-                $("#table-sortable tr a", data).each(function() {
-                    freeSubs.push(parseInt($(this).text().trim()));
-                });
+                if (freeApps) {
+                    $("#table-sortable tr.app", data).each(function() {
+                        var appType =  $("td", this)[1].textContent.trim();
+                        var appId = $("td", this)[0].textContent.trim();
+                        if (!unwantedAppTypes.includes(appType)) {
+                            freeSubs.push(parseInt(appId));
+                        } else {
+                            // Uncomment the lines below if you want to see the unwanted apps
+                            // var appName = $("td", this)[2].textContent.trim();
+                            // console.log("Unwanted app: " + appName + " (" + appId + ")");
+                        }
+                    });
+                } else {
+                    $("#table-sortable tr.package", data).each(function() {
+                        var wantedPackage = true;
+                        var packageId = $("td", this)[0].textContent;
+                        var packageName = $("td", this)[1].textContent;
+
+                        var splitPackage = packageName.split(" ");
+                        splitPackage.reverse();
+                        splitPackage.forEach(function(item, index) {
+                            if (unwantedAppTypes.includes(item.trim())) {
+                                // Uncomment the line below if you want to see the unwanted packages
+                                // console.log("Unwanted package: " + packageName + " (" + packageId + ")");
+                                wantedPackage = false;
+                                return;
+                            }
+                        });
+                        if (wantedPackage) {
+                            freeSubs.push(parseInt(packageId.trim()));
+                        }
+                    });
+                }
                 var ownedSubsPromise = setInterval(function() {
                         if (ownedSubs.length > 0) {
                             clearInterval(ownedSubsPromise);
-                            var unownedFreeSubs = $(freeSubs).not(ownedSubs).get().reverse();
+                            var unownedFreeSubs = $(freeSubs).not(ownedSubs).get().sort(sortNumber);
                             console.log("Found " + freeSubs.length + " free sub" + numberEnding(freeSubs.length) + " of which " + unownedFreeSubs.length + " are not owned by us yet");
+                            if (freeSubs.length === 0 && cacheState) {
+                                console.log("Exiting....");
+                                process.exit(0);
+                            }
                             requestFreeSubs(unownedFreeSubs);
                         }
                     }, 10);
@@ -156,9 +220,13 @@ function steamdbLogin(error, response, data) {
     }
 }
 
+function sortNumber(a,b) {
+    return b - a;
+}
+
 function requestFreeSubs(unownedFreeSubs) {
     if (unownedFreeSubs.length > 0) {
-        var subsToAdd = unownedFreeSubs.splice(0, config.max_subs);
+        var subsToAdd = unownedFreeSubs.slice(0, config.max_subs);
         console.log("Attempting to request " + subsToAdd.length + " subs (" + subsToAdd.join() + ")");
         client.requestFreeLicense(subsToAdd, function(error, grantedPackages, grantedAppIDs) {
             if (error) {
@@ -176,11 +244,22 @@ function requestFreeSubs(unownedFreeSubs) {
                 }
                 console.log("Waiting " + millisecondsToStr(config.delay) + " for a new attempt");
                 setTimeout(function() {
-                    requestFreeSubs(unownedFreeSubs)
+                    requestFreeSubs($(unownedFreeSubs).not(subsToAdd).get())
                 }, config.delay);
             }
         });
     } else {
+        console.log("\n\t\t\t\t Restarting...");
+        if (freeApps) {
+            console.log("Finish with free apps...");
+            console.log("Starting with free on demand pakages...");
+        } else {
+            console.log("Finish with free on demand packages...");
+            console.log("Starting with free apps...");
+        }
+        freeApps = !freeApps;
+        ownedSubs = [];
+        cacheState = false;
         client.relog();
     }
 }

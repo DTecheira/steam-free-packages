@@ -10,5 +10,8 @@
         "identity_secret": "IF_USAGE_YOUR_WINAUTH_IDENTITY_SECRET"
     },
     "delay": 1800000,
-    "max_subs": 50
+    "max_subs": 50,
+    "online": false,
+    "unwanted_app_types": ["Demo", "Trailer", "Teaser"], "_comment": "Video, Tool, Game, DLC, Demo, Application, Trailer, Teaser",
+    "free_apps": false, "__comment": "Set true if you want to start scrap free apps, false to scrap free on demand packages"
 }
