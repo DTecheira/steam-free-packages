@@ -39,6 +39,7 @@ var freeApps = config.free_apps == null ? false : config.free_apps;
 var unwantedAppTypes = config.unwanted_app_types == null ? [] : config.unwanted_app_types;
 var online = config.online == null ? true : config.online;
 var cacheState = false;
+var idsFile = __dirname+"/ids.txt";
 
 if (config.winauth_usage) {
     SteamAuth.Sync(function(error) {
@@ -95,24 +96,34 @@ function steamLogin() {
         }
     });
     client.on("webSession", function(sessionID, cookies) {
-        console.log("Got web session");
         if (cacheState) {
             return;
         }
-        var community = new SteamCommunity();
-        community.setCookies(cookies);
-        community.httpRequestGet("https://steamcommunity.com/openid/login?openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.mode=checkid_setup&openid.realm=https%3A%2F%2Fsteamdb.info%2F&openid.return_to=https%3A%2F%2Fsteamdb.info%2Flogin%2F", {
-            followAllRedirects: true
-        }, function(error, response, data) {
-            if (error) {
-                console.log(JSON.stringify(error));
+        fs.readFile(idsFile, function (err, fileData) {
+            if (err || !isValidFileData(fileData)) {
+                console.log("Got web session");
+                var community = new SteamCommunity();
+                community.setCookies(cookies);
+                community.httpRequestGet("https://steamcommunity.com/openid/login?openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.mode=checkid_setup&openid.realm=https%3A%2F%2Fsteamdb.info%2F&openid.return_to=https%3A%2F%2Fsteamdb.info%2Flogin%2F", {
+                    followAllRedirects: true
+                }, function(error, response, data) {
+                    if (error) {
+                        console.log(JSON.stringify(error));
+                    }
+                    var url = $("#openidForm", data).attr("action");
+                    var formdata = $("#openidForm", data).serializeObject();
+                    community.httpRequestPost(url, {
+                        followAllRedirects: true,
+                        formData: formdata
+                    }, steamdbLogin);
+                });
+            } else {
+                console.log("Restoring state....");
+                console.log("Resume requesting apps....");
+                var requestAppsState = JSON.parse(fileData.toString());
+                freeApps = requestAppsState.freeApps;
+                requestFreeSubs(requestAppsState.ids);
             }
-            var url = $("#openidForm", data).attr("action");
-            var formdata = $("#openidForm", data).serializeObject();
-            community.httpRequestPost(url, {
-                followAllRedirects: true,
-                formData: formdata
-            }, steamdbLogin);
         });
     });
     client.on("licenses", function(licenses) {
@@ -243,8 +254,11 @@ function requestFreeSubs(unownedFreeSubs) {
                     console.log(grantedAppIDs.length + " New app" + numberEnding(grantedAppIDs.length) + " (" + grantedAppIDs.join() + ") were successfully granted to our account");
                 }
                 console.log("Waiting " + millisecondsToStr(config.delay) + " for a new attempt");
+
                 setTimeout(function() {
-                    requestFreeSubs($(unownedFreeSubs).not(subsToAdd).get())
+                    var nextUnownedFreeSubs = $(unownedFreeSubs).not(subsToAdd).get();
+                    saveState(nextUnownedFreeSubs);
+                    requestFreeSubs(nextUnownedFreeSubs);
                 }, config.delay);
             }
         });
@@ -262,6 +276,30 @@ function requestFreeSubs(unownedFreeSubs) {
         cacheState = false;
         client.relog();
     }
+}
+
+function isValidFileData(fileData) {
+    try {
+        if (Boolean(fileData)) {
+            var data = JSON.parse(fileData.toString());
+            return Boolean(data.ids) && Boolean(data.ids[0]);
+        }
+    } catch (err) {
+        // Just in case
+    }
+    console.log("Invalid file state");
+    return false;
+}
+
+function saveState(ids) {
+    var requestAppsState = "{\"ids\": [" + ids + "], \"freeApps\": " + freeApps + "}"
+    fs.writeFile(idsFile, requestAppsState, { flag: 'w' }, function(err) {
+        if (err) {
+            console.log(err);
+        } else {
+            console.log("Unowned Free Subs file saved");
+        }
+    });
 }
 
 function millisecondsToStr(milliseconds) {
